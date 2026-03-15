@@ -1,0 +1,820 @@
+-- ServerManager | Script | ServerScriptService
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local MarketplaceService = game:GetService("MarketplaceService")
+local BadgeService = game:GetService("BadgeService")
+local TextService = game:GetService("TextService")
+local ServerScriptService = game:GetService("ServerScriptService")
+local DataStoreService = game:GetService("DataStoreService")
+
+local GameData = require(ReplicatedStorage:WaitForChild("GameData") :: ModuleScript)
+local PCPartsData = require(ReplicatedStorage:WaitForChild("PCPartsData") :: ModuleScript)
+local GamepassConfig = require(ReplicatedStorage:WaitForChild("GamepassConfig") :: ModuleScript)
+local GroupRewardsConfig = require(ReplicatedStorage:WaitForChild("GroupRewardsConfig") :: ModuleScript)
+local ExploitData = require(ReplicatedStorage:WaitForChild("ExploitData") :: ModuleScript)
+
+local AccessCodeSystem = require(ServerScriptService:WaitForChild("AccessCodeSystem") :: ModuleScript)
+local MissionsConfig = require(ServerScriptService:WaitForChild("MissionsConfig") :: ModuleScript )
+local PCStatsManager = require(ServerScriptService:WaitForChild("PCStatsManager") :: ModuleScript)
+local NetworkGenerator = require(ServerScriptService:WaitForChild("NetworkGenerator") :: ModuleScript)
+local RemoteEventsManager = require(ServerScriptService:WaitForChild("RemoteEventsManager") :: ModuleScript)
+
+-- [ FRAMEWORK MODULES ]
+local DataSaveManager = require(ServerScriptService.ServerFramework.DataSaveManager)
+local NetworkSetupManager = require(ServerScriptService.ServerFramework.NetworkSetupManager)
+local NetworkStateManager = require(ServerScriptService.ServerFramework.NetworkStateManager)
+local OperationManager = require(ServerScriptService.ServerFramework.OperationManager)
+local AdminMonetizationManager = require(ServerScriptService.ServerFramework.AdminMonetizationManager)
+local ServerLoopManager = require(ServerScriptService.ServerFramework.ServerLoopManager)
+local MailManager = require(ServerScriptService.ServerFramework.MailManager)
+local EconomyManager = require(ServerScriptService.ServerFramework.EconomyManager)
+local GuildServerManager = require(ServerScriptService.ServerFramework.GuildServerManager)
+local HardwareManager = require(ServerScriptService.ServerFramework.HardwareManager)
+local ProgressionManager = require(ServerScriptService.ServerFramework.ProgressionManager)
+local CrimeManager = require(ServerScriptService.ServerFramework.CrimeManager)
+local TerminalManager = require(ServerScriptService.ServerFramework.TerminalManager)
+local NetworkActionManager = require(ServerScriptService.ServerFramework.NetworkActionManager)
+local ProgramServerBridge = require(ServerScriptService.ServerFramework.ProgramServerBridge)
+
+local ver = ReplicatedStorage:WaitForChild("Version").Value
+
+-- Initialize RemoteEvents
+local RemoteData = RemoteEventsManager.Initialize()
+local RemoteEvents = RemoteData.Folder
+local Events = RemoteData.Events
+local Bindables = RemoteData.Bindables
+
+local TraceManager = require(ServerScriptService:FindFirstChild("TraceManager") :: ModuleScript)
+local GameActions = require(ServerScriptService:FindFirstChild("GameActions") :: ModuleScript)
+local GuildManager = require(ReplicatedStorage:FindFirstChild("GuildManager") :: ModuleScript)
+local DataStoreManager = require(ServerScriptService:FindFirstChild("DataStoreManager") :: ModuleScript)
+local BountyManager = require(ServerScriptService:FindFirstChild("BountyManager") :: ModuleScript)
+local PrebuiltPrograms = require(ServerScriptService:FindFirstChild("PrebuiltPrograms") :: ModuleScript)
+local ProgramManagerModule = require(ReplicatedStorage:FindFirstChild("ProgramManager") :: ModuleScript)
+local ManualPvPModeManager = require(ServerScriptService:FindFirstChild("ManualPvPModeManager") :: ModuleScript)
+
+local ExploitLogger = ServerScriptService:FindFirstChild("ExploitLogger") and require(ServerScriptService.ExploitLogger)
+local SecurityValidator = ServerScriptService:FindFirstChild("SecurityValidator") and require(ServerScriptService.SecurityValidator)
+local AutoModeration = ServerScriptService:FindFirstChild("AutoModeration") and require(ServerScriptService.AutoModeration)
+
+-- [ GLOBAL STATE ]
+_G.PlayerData = {}
+PlayerData = _G.PlayerData
+GlobalNetworks = {}
+NetworkSecurityBoosts = {}
+ActiveOperations = {}
+NetworkAwareness = {}
+PlayerHomeConnections = {}
+ServerNetworkViewerData = {}
+PlayerResourceUsage = {}
+NetworkConnectionHistory = {}
+Guilds = {} 
+GuildNetworks = {}
+cachedGuildList = {}
+PlayerDataDirty = {}
+LastPlayerSave = {}
+ActiveSecurityPrograms = {}
+SpoofedOperations = {}
+
+RC_LIMIT = 1000000000000
+BOUNTY_LIMIT = 100000000
+
+-- [ SHARED HELPER FUNCTIONS ]
+function filterText(text, fromUserId)
+	if not text or text == "" then return text end
+	local success, result = pcall(function() return TextService:FilterStringAsync(text, fromUserId):GetNonChatStringForBroadcastAsync() end)
+	return success and result or text
+end
+
+local SecurityDetectionEvent = Bindables:FindFirstChild("SecurityDetectionEvent")
+
+local function triggerSecurityDetection(ownerUserId, detectionType, networkId, attackerName, extraData)
+	local programs = ActiveSecurityPrograms[ownerUserId]
+	if not programs then return false end
+	local hasHandler = false
+	for blockId, handler in pairs(programs) do
+		if handler.type == detectionType and (not handler.networkId or handler.networkId == networkId) then hasHandler = true; break end
+	end
+	if hasHandler and SecurityDetectionEvent then
+		SecurityDetectionEvent:Fire(ownerUserId, detectionType, networkId, attackerName, extraData)
+		return true
+	end
+	return false
+end
+
+local function registerSecurityDetection(ownerUserId, blockId, detectionType, networkId)
+	if not ActiveSecurityPrograms[ownerUserId] then ActiveSecurityPrograms[ownerUserId] = {} end
+	ActiveSecurityPrograms[ownerUserId][blockId] = { type = detectionType, networkId = networkId }
+end
+
+local function unregisterSecurityDetection(ownerUserId, blockId)
+	if ActiveSecurityPrograms[ownerUserId] then
+		ActiveSecurityPrograms[ownerUserId][blockId] = nil
+		if not next(ActiveSecurityPrograms[ownerUserId]) then ActiveSecurityPrograms[ownerUserId] = nil end
+	end
+end
+
+local function unregisterAllSecurityDetections(ownerUserId)
+	ActiveSecurityPrograms[ownerUserId] = nil
+end
+
+Events.SendTeleportData.OnServerEvent:Connect(function(player, teleportData)
+	if teleportData and teleportData.ManualPvPMode then
+		ManualPvPModeManager.EnableManualMode()
+		task.spawn(function()
+			task.wait(2)
+			if player.Parent then Events.NotifyPlayer:FireClient(player, "Info", "Manual PvP Mode enabled - Programs and scripts are disabled. Terminal-only combat active.") end
+		end)
+	end
+end)
+
+local function buildActionParams(player, extra)
+	local params = {
+		player = player, data = PlayerData[player.UserId], PlayerData = PlayerData, GameData = GameData, GlobalNetworks = GlobalNetworks, ActiveOperations = ActiveOperations, AccessCodeSystem = AccessCodeSystem, NotifyPlayer = Events.NotifyPlayer, SendNetworkData = Events.SendNetworkData, UpdateNetworkNode = Events.UpdateNetworkNode, CancelProgressBar = Events.CancelProgressBar, StartProgressBar = Events.StartProgressBar, UpdateScanProgress = Events.UpdateScanProgress, ScanForNetworksStart = Events.ScanForNetworksStart, UpdateProfileStats = Events.UpdateProfileStats, UpdateMoney = Events.UpdateMoney, TerminalResponse = Events.TerminalResponse, getNetwork = NetworkStateManager.GetNetwork, getEffectiveSecurity = NetworkStateManager.GetEffectiveSecurity, getScanSpeed = OperationManager.GetScanSpeed, getHackSpeed = OperationManager.GetHackSpeed, getMaxOperations = OperationManager.GetMaxOperations, getMaxStoredNetworks = function(p) return PCStatsManager.GetMaxStoredNetworks(PlayerData[p.UserId] and PlayerData[p.UserId].EquippedParts or {}) end, canStartOperation = OperationManager.CanStartOperation, incrementOperations = OperationManager.IncrementOperations, decrementOperations = OperationManager.DecrementOperations, registerOperation = OperationManager.RegisterOperation, unregisterOperation = OperationManager.UnregisterOperation, isOperationActive = OperationManager.IsOperationActive, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, markPlayerDirty = DataSaveManager.MarkPlayerDirty, hasPathToNetwork = NetworkStateManager.HasPathToNetwork, connectNetworks = NetworkStateManager.ConnectNetworks, updateNetworkAwareness = NetworkStateManager.UpdateNetworkAwareness, awardExperience = ProgressionManager.AwardExperience, checkMilestoneRewards = ProgressionManager.CheckMilestoneRewards, getRareNetworkChanceBonus = ProgressionManager.GetRareNetworkChanceBonus, getRoCoinMultiplier = ProgressionManager.GetRoCoinMultiplier, cancelAllPlayerOperations = OperationManager.CancelAllPlayerOperations, triggerSecurityDetection = triggerSecurityDetection, getPlayerSkillEffects = ProgressionManager.GetPlayerSkillEffects, BountyManager = BountyManager
+	}
+	if extra then for k, v in pairs(extra) do params[k] = v end end
+	return params
+end
+
+-- ==============================================================================
+-- [ MODULE INITIALIZATION ]
+-- ==============================================================================
+
+DataSaveManager.Init({ PlayerData = PlayerData, PlayerDataDirty = PlayerDataDirty, DataStoreManager = DataStoreManager, AccessCodeSystem = AccessCodeSystem })
+NetworkSetupManager.Init({ NetworkGenerator = NetworkGenerator, DataStoreManager = DataStoreManager, GameData = GameData, ExploitData = ExploitData, AccessCodeSystem = AccessCodeSystem, GlobalNetworks = GlobalNetworks, PlayerHomeConnections = PlayerHomeConnections, PlayerData = PlayerData, DataSaveManager = DataSaveManager })
+NetworkStateManager.Init({ PlayerData = PlayerData, GlobalNetworks = GlobalNetworks, NetworkSecurityBoosts = NetworkSecurityBoosts, NetworkAwareness = NetworkAwareness, NetworkConnectionHistory = NetworkConnectionHistory, ProgressionManager = ProgressionManager, AccessCodeSystem = AccessCodeSystem, Players = Players, Events = Events, cancelAllPlayerOperations = OperationManager.CancelAllPlayerOperations, TraceManager = TraceManager })
+OperationManager.Init({ PlayerData = PlayerData, ActiveOperations = ActiveOperations, PlayerResourceUsage = PlayerResourceUsage, PCStatsManager = PCStatsManager, ProgressionManager = ProgressionManager, Players = Players, Events = Events })
+EconomyManager.Init({ PlayerData = PlayerData, Guilds = Guilds, DataStoreManager = DataStoreManager, ExploitLogger = ExploitLogger, Events = Events, Players = Players, GameData = GameData, markPlayerDirty = DataSaveManager.MarkPlayerDirty, saveAllPlayerData = DataSaveManager.SaveAllPlayerData, loadPlayerData = DataSaveManager.LoadPlayerData, buildSaveData = DataSaveManager.BuildSaveData })
+MailManager.Init({ PlayerData = PlayerData, DataStoreManager = DataStoreManager, Events = Events, Players = Players, HttpService = HttpService, MissionsConfig = MissionsConfig, GlobalNetworks = GlobalNetworks, AccessCodeSystem = AccessCodeSystem, markPlayerDirty = DataSaveManager.MarkPlayerDirty, filterText = filterText, adjustReputation = ProgressionManager.AdjustReputation })
+GuildServerManager.Init({ PlayerData = PlayerData, Guilds = Guilds, GuildNetworks = GuildNetworks, GlobalNetworks = GlobalNetworks, DataStoreManager = DataStoreManager, NetworkGenerator = NetworkGenerator, AccessCodeSystem = AccessCodeSystem, GuildManager = GuildManager, BountyManager = BountyManager, MailManager = MailManager, Events = Events, Bindables = Bindables, Players = Players, HttpService = HttpService, ReplicatedStorage = ReplicatedStorage, cachedGuildList = cachedGuildList, markPlayerDirty = DataSaveManager.MarkPlayerDirty, queuePlayerSave = DataSaveManager.QueuePlayerSave, loadPlayerData = DataSaveManager.LoadPlayerData, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, filterText = filterText })
+HardwareManager.Init({ PlayerData = PlayerData, DataStoreManager = DataStoreManager, ExploitLogger = ExploitLogger, EconomyManager = EconomyManager, Events = Events, Players = Players, GameData = GameData, PCPartsData = PCPartsData, ExploitData = ExploitData, HttpService = HttpService, SecurityValidator = SecurityValidator, TraceManager = TraceManager, queuePlayerSave = DataSaveManager.QueuePlayerSave, updatePlayerResourceUsage = OperationManager.UpdatePlayerResourceUsage, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, getNetwork = NetworkStateManager.GetNetwork })
+ProgressionManager.Init({ PlayerData = PlayerData, Guilds = Guilds, GameData = GameData, GamepassConfig = GamepassConfig, Events = Events, Players = Players, MarketplaceService = MarketplaceService, DataStoreManager = DataStoreManager, EconomyManager = EconomyManager, markPlayerDirty = DataSaveManager.MarkPlayerDirty, queuePlayerSave = DataSaveManager.QueuePlayerSave, checkLevelRewards = function() end })
+CrimeManager.Init({ PlayerData = PlayerData, Guilds = Guilds, Events = Events, Players = Players, HttpService = HttpService, BountyManager = BountyManager, EconomyManager = EconomyManager, ProgressionManager = ProgressionManager, MailManager = MailManager, DataStoreManager = DataStoreManager, GameActions = GameActions, ExploitLogger = ExploitLogger, getNetwork = NetworkStateManager.GetNetwork, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, buildActionParams = buildActionParams })
+TerminalManager.Init({ PlayerData = PlayerData, Events = Events, GameData = GameData, ReplicatedStorage = ReplicatedStorage, DataStoreService = DataStoreService, HttpService = HttpService, ProgramManagerModule = ProgramManagerModule, CrimeManager = CrimeManager, AccessCodeSystem = AccessCodeSystem, TraceManager = TraceManager, getNetwork = NetworkStateManager.GetNetwork, hasPathToNetwork = NetworkStateManager.HasPathToNetwork, getEffectiveSecurity = NetworkStateManager.GetEffectiveSecurity, getScanSpeed = OperationManager.GetScanSpeed, getHackSpeed = OperationManager.GetHackSpeed, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, cancelAllPlayerOperations = OperationManager.CancelAllPlayerOperations, recordConnectionHistory = NetworkStateManager.RecordConnectionHistory, broadcastPlayerPositions = NetworkStateManager.BroadcastPlayerPositions, updatePlayerResourceUsage = OperationManager.UpdatePlayerResourceUsage, buildActionParams = buildActionParams, canStartOperation = OperationManager.CanStartOperation, getMaxOperations = OperationManager.GetMaxOperations, incrementOperations = OperationManager.IncrementOperations, decrementOperations = OperationManager.DecrementOperations, registerOperation = OperationManager.RegisterOperation, unregisterOperation = OperationManager.UnregisterOperation, isOperationActive = OperationManager.IsOperationActive, triggerSecurityDetection = triggerSecurityDetection, connectNetworks = NetworkStateManager.ConnectNetworks, disconnectNetworks = NetworkStateManager.DisconnectNetworks, markPlayerDirty = DataSaveManager.MarkPlayerDirty, ActiveOperations = ActiveOperations, NetworkConnectionHistory = NetworkConnectionHistory, GlobalNetworks = GlobalNetworks, GameActions = GameActions })
+NetworkActionManager.Init({ PlayerData = PlayerData, GameActions = GameActions, Events = Events, getNetwork = NetworkStateManager.GetNetwork, sanitizeFirewall = NetworkStateManager.SanitizeFirewall, canStartOperation = OperationManager.CanStartOperation, getMaxOperations = OperationManager.GetMaxOperations, getEffectiveSecurity = NetworkStateManager.GetEffectiveSecurity, getHackSpeed = OperationManager.GetHackSpeed, getScanSpeed = OperationManager.GetScanSpeed, incrementOperations = OperationManager.IncrementOperations, decrementOperations = OperationManager.DecrementOperations, registerOperation = OperationManager.RegisterOperation, unregisterOperation = OperationManager.UnregisterOperation, isOperationActive = OperationManager.IsOperationActive, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, recordConnectionHistory = NetworkStateManager.RecordConnectionHistory, updateNetworkAwareness = NetworkStateManager.UpdateNetworkAwareness, broadcastPlayerPositions = NetworkStateManager.BroadcastPlayerPositions, cancelAllPlayerOperations = OperationManager.CancelAllPlayerOperations, buildActionParams = buildActionParams, NetworkGenerator = NetworkGenerator, DataStoreManager = DataStoreManager, TraceManager = TraceManager, AccessCodeSystem = AccessCodeSystem, PlayerHomeConnections = PlayerHomeConnections, GameData = GameData })
+ProgramServerBridge.Init({ PlayerData = PlayerData, GlobalNetworks = GlobalNetworks, ActiveOperations = ActiveOperations, SpoofedOperations = SpoofedOperations, PlayerHomeConnections = PlayerHomeConnections, GameData = GameData, GameActions = GameActions, AccessCodeSystem = AccessCodeSystem, TraceManager = TraceManager, DataStoreManager = DataStoreManager, NetworkGenerator = NetworkGenerator, BountyManager = BountyManager, Players = Players, HttpService = HttpService, ReplicatedStorage = ReplicatedStorage, BadgeService = BadgeService, PCStatsManager = PCStatsManager, buildActionParams = buildActionParams, getNetwork = NetworkStateManager.GetNetwork, isNetworkConnected = NetworkStateManager.IsNetworkConnected, connectNetworks = NetworkStateManager.ConnectNetworks, disconnectNetworks = NetworkStateManager.DisconnectNetworks, prepareNetworksForClient = NetworkStateManager.PrepareNetworksForClient, sanitizeFirewall = NetworkStateManager.SanitizeFirewall, getEffectiveSecurity = NetworkStateManager.GetEffectiveSecurity, canStartOperation = OperationManager.CanStartOperation, getMaxOperations = OperationManager.GetMaxOperations, getHackSpeed = OperationManager.GetHackSpeed, getScanSpeed = OperationManager.GetScanSpeed, registerOperation = OperationManager.RegisterOperation, isOperationActive = OperationManager.IsOperationActive, unregisterOperation = OperationManager.UnregisterOperation, decrementOperations = OperationManager.DecrementOperations, incrementOperations = OperationManager.IncrementOperations, markPlayerDirty = DataSaveManager.MarkPlayerDirty, cancelAllPlayerOperations = OperationManager.CancelAllPlayerOperations, updateNetworkAwareness = NetworkStateManager.UpdateNetworkAwareness, triggerSecurityDetection = triggerSecurityDetection, registerSecurityDetection = registerSecurityDetection, unregisterSecurityDetection = unregisterSecurityDetection, unregisterAllSecurityDetections = unregisterAllSecurityDetections, Events = Events })
+AdminMonetizationManager.Init({ PlayerData = PlayerData, Guilds = Guilds, Events = Events, Bindables = Bindables, Players = Players, MarketplaceService = MarketplaceService, GamepassConfig = GamepassConfig, EconomyManager = EconomyManager, HardwareManager = HardwareManager, BountyManager = BountyManager, DataStoreManager = DataStoreManager, ReplicatedStorage = ReplicatedStorage })
+ServerLoopManager.Init({ Events = Events, Players = Players, BountyManager = BountyManager, PlayerData = PlayerData, MailManager = MailManager, OperationManager = OperationManager, NetworkStateManager = NetworkStateManager, TraceManager = TraceManager, ProgressionManager = ProgressionManager, NetworkSecurityBoosts = NetworkSecurityBoosts, NetworkAwareness = NetworkAwareness, GameData = GameData, DataStoreManager = DataStoreManager, PlayerDataDirty = PlayerDataDirty, LastPlayerSave = LastPlayerSave, DataSaveManager = DataSaveManager, AutoModeration = AutoModeration, ExploitLogger = ExploitLogger, Guilds = Guilds })
+
+TraceManager.Initialize({
+	GameData = GameData, AccessCodeSystem = AccessCodeSystem, Players = Players,
+	Events = { StartTrace = Events.StartTrace, CancelTrace = Events.CancelTrace, StartTraceProgress = Events.StartTraceProgress, NotifyPlayer = Events.NotifyPlayer, UpdateMoney = Events.UpdateMoney, UpdateProfileStats = Events.UpdateProfileStats, SendNetworkData = Events.SendNetworkData, TerminalResponse = Events.TerminalResponse, TraceConnectionResult = Events.TraceConnectionResult }
+})
+
+-- ==============================================================================
+-- [ MISSING TUTORIAL HELPERS ]
+-- ==============================================================================
+
+local function generateTutorialNetwork(playerIP)
+	local tutorialIP = "10.0." .. math.random(0, 255) .. "." .. math.random(1, 254)
+	local networkId = HttpService:GenerateGUID(false)
+	local tutorialNetwork = {
+		Id = networkId, IP = tutorialIP, Name = "Tutorial Network", Type = "SmallHome", Security = 1, AdminTier = 0, HasAdmin = false, Scanned = false, Hacked = false, Owner = "Tutorial", Locked = false, LockExpiry = 0, TracesReceived = 0, Devices = {}, ConnectedNetworks = {}, Position = Vector2.new(math.random(-150, 150), math.random(-150, 150)), Visible = false, IsTutorialNetwork = true, AccessCode = AccessCodeSystem.GenerateAccessCode()
+	}
+	table.insert(tutorialNetwork.Devices, { Id = HttpService:GenerateGUID(false), Type = "Desktop", Name = "Tutorial PC", Security = 1, Icon = "💻", Scanned = false, Hacked = false, IsPlayerComputer = false, LANIP = "192.168.1.10", AccessCode = AccessCodeSystem.GenerateAccessCode() })
+	return tutorialNetwork
+end
+
+local function generateTutorialPracticeNetwork(currentNetPosition)
+	local practiceIP = "192.168." .. math.random(0, 255) .. "." .. math.random(1, 254)
+	local networkId = HttpService:GenerateGUID(false)
+	local practiceNetwork = {
+		Id = networkId, IP = practiceIP, Name = "Practice Network", Type = "SmallHome", Security = 1, AdminTier = 0, HasAdmin = false, Scanned = false, Hacked = false, Owner = "Practice", Locked = false, LockExpiry = 0, TracesReceived = 0, Devices = {}, ConnectedNetworks = {}, Position = currentNetPosition + Vector2.new(math.random(-80, 80), math.random(-80, 80)), Visible = true, IsTutorialPracticeNetwork = true, AccessCode = AccessCodeSystem.GenerateAccessCode()
+	}
+	table.insert(practiceNetwork.Devices, { Id = HttpService:GenerateGUID(false), Type = "Desktop", Name = "Basic PC", Security = 1, Icon = "💻", Scanned = false, Hacked = false, IsPlayerComputer = false, LANIP = "192.168.1.20", AccessCode = AccessCodeSystem.GenerateAccessCode() })
+	return practiceNetwork
+end
+
+-- ==============================================================================
+-- [ PLAYER INITIALIZATION ]
+-- ==============================================================================
+
+local function initializePlayer(player)
+	OperationManager.CleanupStaleOperations(player.UserId)
+	if ActiveOperations[player.UserId] then ActiveOperations[player.UserId] = {} end
+	if PlayerResourceUsage[player.UserId] then PlayerResourceUsage[player.UserId] = {CPU = 0, RAM = 0, NET = 0} end
+
+	local savedData = DataSaveManager.LoadAllPlayerData(player.UserId)
+	if DataStoreManager.DidDataLoadFail(player.UserId) then
+		Events.NotifyPlayer:FireClient(player, "Error", "Failed to load data. Rejoin.")
+		task.wait(3); player:Kick("Data failed to load."); return
+	end
+
+	local playerIP = NetworkSetupManager.GetPlayerIP(player.UserId)
+	
+	PlayerData[player.UserId] = {
+		Money = savedData and savedData.Money or GameData.StartingMoney, IP = playerIP, CurrentNetwork = nil, LoggedInNetwork = nil, LoggedInDevice = nil, HomeNetwork = nil, PositiveRep = 0, NegativeRep = 0, Reputation = savedData and savedData.Reputation or 0, Level = savedData and savedData.Level or 0, Experience = savedData and savedData.Experience or 0, CPULevel = 1, RAMLevel = 1, NetworkLevel = 1, PCSecurityLevel = savedData and savedData.PCSecurityLevel or 1, HomeAdminTier = 0, BankBalance = savedData and savedData.BankBalance or 0, ScannedNetworks = {}, TracedBy = {}, LockedNetworks = {}, NetworkValue = {}, Networks = {}, ActiveOperationsCount = 0, OwnedParts = savedData and savedData.OwnedParts or {}, EquippedParts = savedData and savedData.EquippedParts or {CPU = nil, GPU = nil, RAM1 = nil, RAM2 = nil, RAM3 = nil, RAM4 = nil, PSU = nil, HDD = nil, NET = nil}, Motherboard = savedData and savedData.Motherboard or nil, BaseResourceUsage = {CPU = 5, RAM = 10, NET = 5}, Settings = savedData and savedData.Settings or DataStoreManager.GetDefaultSettings(), Stats = savedData and savedData.Stats or {ScansCompleted = 0, HacksCompleted = 0, TimesHacked = 0, TimesTraced = 0, PlayersHacked = 0, HighestRC = 0}, OwnedGamepasses = {}, ActiveBoosts = {}, Guild = savedData and savedData.Guild or nil, SkillPoints = savedData and savedData.SkillPoints or 0, UnlockedSkills = savedData and savedData.UnlockedSkills or {}, MilestoneRewards = savedData and savedData.MilestoneRewards or {}, PendingSkillPoints = savedData and savedData.PendingSkillPoints or 0, GroupRewardClaimed = savedData and savedData.GroupRewardClaimed or nil, LevelRewards = savedData and savedData.LevelRewards or {}, LastInterestTime = savedData and savedData.LastSave or os.time(), TutorialCompleted = savedData and savedData.TutorialCompleted or false, ShopLastRefresh = savedData and savedData.ShopLastRefresh or 0, DarkMarketLastRefresh = savedData and savedData.DarkMarketLastRefresh or 0, StolenFromGoodNetworks = savedData and savedData.StolenFromGoodNetworks or 0, OwnedExploits = savedData and savedData.OwnedExploits or {}, SpecialItems = savedData and savedData.SpecialItems or {}, NetworkScannerLevel = savedData and savedData.NetworkScannerLevel or 1, NetworkHackingLevel = savedData and savedData.NetworkHackingLevel or 1, ScriptingAreaUnlocked = savedData and savedData.ScriptingAreaUnlocked or false, UnlockedScriptBlocks = savedData and savedData.UnlockedScriptBlocks or {}, ProtocolLockoutUntil = savedData and savedData.ProtocolLockoutUntil or 0
+	}
+
+	if PlayerData[player.UserId].Guild and Guilds[PlayerData[player.UserId].Guild] then
+		GuildServerManager.SaveGuildData(PlayerData[player.UserId].Guild, false)
+	end
+
+	AccessCodeSystem.InitializePlayerLogs(player.UserId)
+
+	task.spawn(function()
+		task.wait(2)
+		if SecurityValidator and PlayerData[player.UserId] then
+			for _, part in ipairs(PlayerData[player.UserId].OwnedParts or {}) do
+				local suspicious, suspReason = SecurityValidator.IsPartSuspicious(part)
+				if suspicious then
+					if ExploitLogger then ExploitLogger.Log(player.UserId, "SuspiciousPart", "Found suspicious part: " .. tostring(part.Name or "Unknown") .. " - " .. tostring(suspReason), "Critical") end
+					if AutoModeration then AutoModeration.BanPlayer(player.UserId, "Suspicious PC part detected", ExploitLogger) end
+					return
+				end
+			end
+		end
+		if AutoModeration and ExploitLogger and PlayerData[player.UserId] then AutoModeration.RunAutoModOnPlayer(player.UserId, PlayerData, ExploitLogger) end
+	end)
+
+	if not savedData or not savedData.OwnedParts or #PlayerData[player.UserId].OwnedParts == 0 then
+		local startingParts, startingMobo = HardwareManager.GenerateStartingParts()
+		PlayerData[player.UserId].OwnedParts = startingParts
+		PlayerData[player.UserId].Motherboard = startingMobo
+		PlayerData[player.UserId].EquippedParts = { CPU = startingParts[1], RAM1 = startingParts[2], PSU = startingParts[3], HDD = startingParts[4], NET = startingParts[5] }
+	else
+		HardwareManager.FixDuplicatePartIds(player.UserId)
+	end
+
+	local playerNetworks = NetworkSetupManager.GenerateNetworksForPlayer(player, playerIP)
+	PlayerData[player.UserId].Networks = playerNetworks
+
+	if savedData and savedData.HomeNetwork then
+		local hn = PlayerData[player.UserId].Networks[1]
+		if hn then
+			hn.Security = savedData.HomeNetwork.Security or hn.Security
+			hn.AdminTier = savedData.HomeNetwork.AdminTier or hn.AdminTier
+			hn.Firewall = NetworkStateManager.SanitizeFirewall(savedData.HomeNetwork.Firewall)
+		end
+	end
+
+	PlayerData[player.UserId].HomeNetwork = PlayerData[player.UserId].Networks[1].Id
+	PlayerData[player.UserId].CurrentNetwork = PlayerData[player.UserId].HomeNetwork
+	PlayerData[player.UserId].Networks[1].Scanned = true
+	PlayerData[player.UserId].Networks[1].Hacked = true
+
+	if ServerNetworkViewerData[player.UserId] then
+		local savedViewerData = ServerNetworkViewerData[player.UserId]
+		for _, savedNet in ipairs(savedViewerData.Networks) do
+			if savedNet.Id ~= PlayerData[player.UserId].HomeNetwork then
+				table.insert(PlayerData[player.UserId].Networks, savedNet)
+			end
+		end
+		ServerNetworkViewerData[player.UserId] = nil
+	end
+
+	Events.UpdateMoney:FireClient(player, PlayerData[player.UserId].Money)
+	Events.SendShopRefreshTimes:FireClient(player, PlayerData[player.UserId].ShopLastRefresh, PlayerData[player.UserId].DarkMarketLastRefresh)
+	Events.SendSystemData:FireClient(player, { Money = PlayerData[player.UserId].Money, CPULevel = PlayerData[player.UserId].CPULevel, RAMLevel = PlayerData[player.UserId].RAMLevel, NetworkLevel = PlayerData[player.UserId].NetworkLevel, PCSecurityLevel = PlayerData[player.UserId].PCSecurityLevel, HomeAdminTier = PlayerData[player.UserId].HomeAdminTier, OwnedGamepasses = PlayerData[player.UserId].OwnedGamepasses, ScriptingAreaUnlocked = PlayerData[player.UserId].ScriptingAreaUnlocked or false, UnlockedScriptBlocks = PlayerData[player.UserId].UnlockedScriptBlocks or {}, NetworkScannerLevel = PlayerData[player.UserId].NetworkScannerLevel or 1, NetworkHackingLevel = PlayerData[player.UserId].NetworkHackingLevel or 1, SkillPoints = PlayerData[player.UserId].SkillPoints or 0, UnlockedSkills = PlayerData[player.UserId].UnlockedSkills or {}})
+
+	HardwareManager.EnsureStartingPartsMarked(player.UserId)
+	Events.SendPCPartsData:FireClient(player, { OwnedParts = PlayerData[player.UserId].OwnedParts, EquippedParts = PlayerData[player.UserId].EquippedParts, Motherboard = PlayerData[player.UserId].Motherboard })
+
+	local clientNetworks = NetworkStateManager.PrepareNetworksForClient(PlayerData[player.UserId].Networks, player.UserId)
+	pcall(function() Events.SendNetworkData:FireClient(player, clientNetworks, PlayerData[player.UserId].CurrentNetwork, PlayerData[player.UserId].LoggedInNetwork, PlayerData[player.UserId].LoggedInDevice) end)
+	Events.SendSettings:FireClient(player, PlayerData[player.UserId].Settings)
+
+	OperationManager.UpdatePlayerResourceUsage(player.UserId)
+	NetworkStateManager.BroadcastPlayerPositions(player)
+
+	if not PlayerData[player.UserId].TutorialCompleted then
+		if not savedData then MailManager.SendWelcomeMail(player.UserId) end
+		task.wait(0.5)
+		Events.StartTutorial:FireClient(player)
+	end
+
+	EconomyManager.CheckAndResetPlayerRC(player.UserId)
+	if PlayerData[player.UserId].Guild then EconomyManager.CheckAndResetGuildRC(PlayerData[player.UserId].Guild) end
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+end
+
+-- ==============================================================================
+-- [ SERVER LIFECYCLE ]
+-- ==============================================================================
+
+Players.PlayerAdded:Connect(initializePlayer)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	task.spawn(function() initializePlayer(player) end)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	if PlayerData[player.UserId] then
+		PlayerDataDirty[player.UserId] = nil
+		LastPlayerSave[player.UserId] = nil
+		
+		local playerIP = PlayerData[player.UserId].IP
+		NetworkGenerator.ReleaseIP(playerIP)
+
+		ServerNetworkViewerData[player.UserId] = { Networks = {}, SavedAt = time(), LoginStatus = {}, HackTimers = {}, StealTimers = {} }
+		if AccessCodeSystem.LoggedInNetworks[player.UserId] then ServerNetworkViewerData[player.UserId].LoginStatus = AccessCodeSystem.LoggedInNetworks[player.UserId] end
+		if AccessCodeSystem.HackTimers[player.UserId] then ServerNetworkViewerData[player.UserId].HackTimers = AccessCodeSystem.HackTimers[player.UserId] end
+		if AccessCodeSystem.StealTimers[player.UserId] then ServerNetworkViewerData[player.UserId].StealTimers = AccessCodeSystem.StealTimers[player.UserId] end
+
+		if PlayerData[player.UserId].Networks then
+			for _, network in ipairs(PlayerData[player.UserId].Networks) do
+				if network then
+					local savedDevices = {}
+					if network.Devices then
+						for _, device in ipairs(network.Devices) do
+							table.insert(savedDevices, { Id = device.Id, Scanned = device.Scanned, Hacked = device.Hacked, RelativePosition = device.RelativePosition, ParentMainframe = device.ParentMainframe, SubDevices = device.SubDevices, IsMainframe = device.IsMainframe, IsSpecialDevice = device.IsSpecialDevice })
+						end
+					end
+					table.insert(ServerNetworkViewerData[player.UserId].Networks, { Id = network.Id, Position = network.Position, Visible = network.Visible, Scanned = network.Scanned, Hacked = network.Hacked, ConnectedNetworks = network.ConnectedNetworks, Devices = savedDevices })
+				end
+			end
+		end
+
+		DataSaveManager.FlushPlayerData(player.UserId)
+		DataStoreManager.CleanupPlayer(player.UserId)
+
+		for networkId, connections in pairs(PlayerHomeConnections) do
+			if connections[player.UserId] then connections[player.UserId] = nil end
+		end
+
+		for otherUserId, otherData in pairs(PlayerData) do
+			if otherUserId ~= player.UserId and otherData.Networks then
+				for i = #otherData.Networks, 1, -1 do
+					if otherData.Networks[i].IsOtherPlayerHome and otherData.Networks[i].OriginalOwnerId == player.UserId then
+						table.remove(otherData.Networks, i)
+					end
+				end
+				local otherPlayer = Players:GetPlayerByUserId(otherUserId)
+				if otherPlayer then
+					local clientNetworks = NetworkStateManager.PrepareNetworksForClient(otherData.Networks, otherUserId)
+					Events.SendNetworkData:FireClient(otherPlayer, clientNetworks, otherData.CurrentNetwork, otherData.LoggedInNetwork, otherData.LoggedInDevice)
+				end
+			end
+		end
+
+		if PlayerData[player.UserId].Guild and Guilds[PlayerData[player.UserId].Guild] then
+			GuildServerManager.SaveGuildData(PlayerData[player.UserId].Guild, true)
+		end
+
+		PlayerData[player.UserId] = nil
+		ActiveOperations[player.UserId] = nil
+		PlayerResourceUsage[player.UserId] = nil
+		TraceManager.CleanupPlayerTraces(player.UserId)
+		NetworkStateManager.BroadcastPlayerPositions(nil)
+	end
+end)
+
+game:BindToClose(function()
+	local saveThreads = {}
+	for userId, data in pairs(PlayerData) do
+		local thread = task.spawn(function() DataSaveManager.FlushPlayerData(userId) end)
+		table.insert(saveThreads, thread)
+	end
+	if BountyManager then BountyManager.ForceSave() end
+	DataStoreManager.FlushPendingGuildSaves()
+	task.wait(3)
+end)
+
+NetworkSetupManager.InitializeGlobalPlayerTestingHub()
+NetworkSetupManager.InitializeGlobalNetworks()
+
+-- ==============================================================================
+-- [ MISSING UI & ACTION EVENTS (RESTORED) ]
+-- ==============================================================================
+
+Events.RequestNetworks.OnServerEvent:Connect(function(player)
+	local userId = player.UserId
+	if PlayerData[userId] then
+		if not PlayerData[userId].Networks then PlayerData[userId].Networks = {} end
+		local clientNetworks = NetworkStateManager.PrepareNetworksForClient(PlayerData[userId].Networks, userId)
+		Events.SendNetworkData:FireClient(player, clientNetworks, PlayerData[userId].CurrentNetwork, PlayerData[userId].LoggedInNetwork, PlayerData[userId].LoggedInDevice)
+		Events.UpdateMoney:FireClient(player, PlayerData[userId].Money)
+		Events.SendSystemData:FireClient(player, { Money = PlayerData[userId].Money, CPULevel = PlayerData[userId].CPULevel, RAMLevel = PlayerData[userId].RAMLevel, NetworkLevel = PlayerData[userId].NetworkLevel, PCSecurityLevel = PlayerData[userId].PCSecurityLevel, HomeAdminTier = PlayerData[userId].HomeAdminTier, OwnedGamepasses = PlayerData[userId].OwnedGamepasses, ScriptingAreaUnlocked = PlayerData[userId].ScriptingAreaUnlocked or false, UnlockedScriptBlocks = PlayerData[userId].UnlockedScriptBlocks or {}, SkillPoints = PlayerData[userId].SkillPoints or 0, MaxSkillPoints = GameData.SkillTree.MaxSkillPoints, NetworkScannerLevel = PlayerData[userId].NetworkScannerLevel or 1, NetworkHackingLevel = PlayerData[userId].NetworkHackingLevel or 1 })
+	end
+end)
+
+Events.RequestSystemData.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	Events.SendSystemData:FireClient(player, { Money = data.Money, CPULevel = data.CPULevel, RAMLevel = data.RAMLevel, NetworkLevel = data.NetworkLevel, PCSecurityLevel = data.PCSecurityLevel, HomeAdminTier = data.HomeAdminTier, OwnedGamepasses = data.OwnedGamepasses, ScriptingAreaUnlocked = data.ScriptingAreaUnlocked or false, UnlockedScriptBlocks = data.UnlockedScriptBlocks or {}, NetworkScannerLevel = data.NetworkScannerLevel or 1, NetworkHackingLevel = data.NetworkHackingLevel or 1, SkillPoints = data.SkillPoints or 0, UnlockedSkills = data.UnlockedSkills or {} })
+end)
+
+Events.RestartTutorial.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	data.TutorialCompleted = false
+	data.ScannedNetworks = {}
+	for i = #data.Networks, 1, -1 do if data.Networks[i].IsTutorialNetwork or data.Networks[i].IsTutorialPracticeNetwork then table.remove(data.Networks, i) end end
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	local clientNetworks = NetworkStateManager.PrepareNetworksForClient(data.Networks, player.UserId)
+	Events.SendNetworkData:FireClient(player, clientNetworks, data.CurrentNetwork, data.LoggedInNetwork, data.LoggedInDevice)
+	task.wait(0.5)
+	Events.StartTutorial:FireClient(player)
+	Events.NotifyPlayer:FireClient(player, "Success", "Tutorial restarted!")
+end)
+
+Events.CompleteTutorial.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	data.TutorialCompleted = true
+	data.CurrentNetwork = data.HomeNetwork
+	data.LoggedInNetwork = nil
+	data.LoggedInDevice = nil
+	for i = #data.Networks, 1, -1 do if data.Networks[i].IsTutorialNetwork or data.Networks[i].IsTutorialPracticeNetwork then table.remove(data.Networks, i) end end
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	local clientNetworks = NetworkStateManager.PrepareNetworksForClient(data.Networks, player.UserId)
+	Events.SendNetworkData:FireClient(player, clientNetworks, data.CurrentNetwork, data.LoggedInNetwork, data.LoggedInDevice)
+	Events.CenterOnHomeNetwork:FireClient(player)
+	Events.NotifyPlayer:FireClient(player, "Success", "Tutorial completed! Check your mail for more tips.")
+end)
+
+Events.GenerateTutorialNetwork.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	for _, net in ipairs(data.Networks) do if net.IsTutorialNetwork then local clientNetworks = NetworkStateManager.PrepareNetworksForClient(data.Networks, player.UserId); Events.SendNetworkData:FireClient(player, clientNetworks, data.CurrentNetwork, data.LoggedInNetwork, data.LoggedInDevice) return end end
+	local homeNet = NetworkStateManager.GetNetwork(data.HomeNetwork, player.UserId)
+	local homePos = homeNet and homeNet.Position or Vector2.new(0, 0)
+	local tutorialNetwork = generateTutorialNetwork(homeNet and homeNet.IP or "0.0.0.0")
+	tutorialNetwork.Visible = false
+	tutorialNetwork.Position = homePos + Vector2.new(math.random(80, 120), math.random(-50, 50))
+	table.insert(data.Networks, tutorialNetwork)
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	local clientNetworks = NetworkStateManager.PrepareNetworksForClient(data.Networks, player.UserId)
+	Events.SendNetworkData:FireClient(player, clientNetworks, data.CurrentNetwork, data.LoggedInNetwork, data.LoggedInDevice)
+end)
+
+Events.ResetPlayerData.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	OperationManager.CancelAllPlayerOperations(player)
+	local oldIP = data.IP
+	if oldIP and NetworkGenerator.IsIPUsed(oldIP) then NetworkGenerator.ReleaseIP(oldIP) end
+	pcall(function() DataStoreManager.Stores.PlayerIP:RemoveAsync("IP_" .. player.UserId) end)
+
+	local playerIP = NetworkSetupManager.GenerateIP()
+	DataStoreManager.SavePlayerIP(player.UserId, playerIP)
+	data.IP = playerIP; data.Money = GameData.StartingMoney; data.CurrentNetwork = data.HomeNetwork; data.PositiveRep = 0; data.NegativeRep = 0; data.Reputation = 0; data.Level = 0; data.Experience = 0; data.BankBalance = 0; data.CPULevel = 1; data.RAMLevel = 1; data.NetworkLevel = 1; data.PCSecurityLevel = 1; data.HomeAdminTier = 0; data.ScannedNetworks = {}; data.TracedBy = {}; data.LockedNetworks = {}; data.NetworkValue = {}; data.ActiveOperationsCount = 0; data.StolenFromGoodNetworks = 0
+	
+	if data.Guild then local guild = Guilds[data.Guild]; if guild then for i = #guild.Members, 1, -1 do if guild.Members[i].UserId == player.UserId then table.remove(guild.Members, i) break end end GuildServerManager.SaveGuildData(data.Guild) end end
+	data.Guild = nil; data.OwnedExploits = {}; data.ActiveBoosts = {}
+
+	for networkId, connections in pairs(PlayerHomeConnections) do if connections[player.UserId] then connections[player.UserId] = nil end end
+	data.Stats = { ScansCompleted = 0, HacksCompleted = 0, TimesHacked = 0, TimesTraced = 0, PlayersHacked = 0, HighestRC = 0 }
+	
+	pcall(function() DataStoreManager.Stores.PlayerPCParts:RemoveAsync("Parts_" .. player.UserId) end)
+	pcall(function() DataStoreManager.Stores.PlayerData:RemoveAsync("Data_" .. player.UserId) end)
+	pcall(function() DataStoreService:GetDataStore("PlayerPrograms"):RemoveAsync("Programs_" .. player.UserId) end)
+	pcall(function() DataStoreService:GetDataStore("ProgramStoreRatings" .. ver):RemoveAsync("Purchases_" .. player.UserId) end)
+
+	local startingParts, startingMobo = HardwareManager.GenerateStartingParts()
+	data.OwnedParts = startingParts; data.Motherboard = startingMobo; data.EquippedParts = { CPU = startingParts[1], RAM1 = startingParts[2], PSU = startingParts[3], HDD = startingParts[4], NET = startingParts[5] }
+	DataSaveManager.QueuePlayerSave(player.UserId)
+
+	local playerNetworks = NetworkSetupManager.GenerateNetworksForPlayer(player, playerIP)
+	data.Networks = playerNetworks
+	for _, network in ipairs(playerNetworks) do if network.ConnectedNetworks then network.ConnectedNetworks = {} end end
+	for _, network in ipairs(playerNetworks) do if network.IsPlayerHome then data.HomeNetwork = network.Id; data.CurrentNetwork = network.Id; network.Scanned = true; network.Hacked = true; for _, device in ipairs(network.Devices) do device.Scanned = true end break end end
+	
+	PlayerResourceUsage[player.UserId] = {CPU = 5, RAM = 10, NET = 5}
+	OperationManager.UpdatePlayerResourceUsage(player.UserId)
+
+	if BountyManager then BountyManager.RemovePoliceBounty(player.UserId); BountyManager.RemoveCriminalBounty(player.Name, false) end
+	Events.UpdateMoney:FireClient(player, data.Money)
+	pcall(function() DataStoreManager.SetPlayerMoney(player.UserId, data.Money) end)
+
+	local clientNetworks = NetworkStateManager.PrepareNetworksForClient(data.Networks, player.UserId)
+	Events.SendNetworkData:FireClient(player, clientNetworks, data.CurrentNetwork, data.LoggedInNetwork, data.LoggedInDevice)
+	Events.SendSystemData:FireClient(player, { Money = data.Money, CPULevel = data.CPULevel, RAMLevel = data.RAMLevel, NetworkLevel = data.NetworkLevel, PCSecurityLevel = data.PCSecurityLevel, HomeAdminTier = data.HomeAdminTier, OwnedGamepasses = data.OwnedGamepasses, ScriptingAreaUnlocked = data.ScriptingAreaUnlocked or false, UnlockedScriptBlocks = data.UnlockedScriptBlocks or {}, SkillPoints = data.SkillPoints or 0, MaxSkillPoints = GameData.SkillTree.MaxSkillPoints, NetworkScannerLevel = data.NetworkScannerLevel or 1, NetworkHackingLevel = data.NetworkHackingLevel or 1 })
+	Events.SendPCPartsData:FireClient(player, { OwnedParts = data.OwnedParts, EquippedParts = data.EquippedParts, Motherboard = data.Motherboard })
+	Events.UpdateExperience:FireClient(player, data.Level, data.Experience)
+	Events.UpdateReputation:FireClient(player, data.Reputation)
+	Events.UpdateProfileStats:FireClient(player, data.Stats)
+	Events.SendBankData:FireClient(player, data.BankBalance, 2)
+	Events.SendProfileData:FireClient(player, { Name = player.Name, Level = data.Level, Experience = data.Experience, Reputation = data.Reputation, Money = data.Money, BankBalance = data.BankBalance or 0, Guild = nil, Stats = data.Stats })
+
+	if Events.SendPrograms then Events.SendPrograms:FireClient(player, {}) end
+	Events.NotifyPlayer:FireClient(player, "Success", "All data has been reset!")
+end)
+
+Events.GetTransactionLogs.OnServerEvent:Connect(function(player, networkId, deviceId)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	if not AccessCodeSystem.IsLoggedIn(player.UserId, networkId, deviceId) then Events.TerminalResponse:FireClient(player, "ERROR: You must be logged in to view logs!") return end
+
+	local transactionLogs = AccessCodeSystem.GetTransactionLogs(networkId, deviceId)
+	local connectionLogs = AccessCodeSystem.GetConnectionLogs(networkId, deviceId)
+	local logText = "=== SYSTEM LOGS ===\n\n-- Connection Logs --\n"
+
+	if #connectionLogs == 0 then logText = logText .. "No connection activity recorded.\n" else
+		for i = math.max(1, #connectionLogs - 9), #connectionLogs do
+			local log = connectionLogs[i]
+			logText = logText .. string.format("[%s] %s from %s (%ds ago)\n", log.Success and "SUCCESS" or "FAILED", log.Action, log.UserIP, math.floor(os.time() - log.Time))
+		end
+	end
+
+	logText = logText .. "\n-- Transaction Logs --\n"
+	if #transactionLogs == 0 then logText = logText .. "No transactions recorded.\n" else
+		for i = math.max(1, #transactionLogs - 9), #transactionLogs do
+			local log = transactionLogs[i]
+			logText = logText .. string.format("%s %d RC from %s (%ds ago)\n", log.Type, log.Amount, log.SourceIP, math.floor(os.time() - log.Time))
+		end
+	end
+	Events.TerminalResponse:FireClient(player, logText)
+end)
+
+Events.GetConnectionLogs.OnServerEvent:Connect(function(player, networkId, deviceId)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	if not AccessCodeSystem.IsLoggedIn(player.UserId, networkId, deviceId) then Events.TerminalResponse:FireClient(player, "ERROR: You must be logged in to view logs!") return end
+
+	local connectionLogs = AccessCodeSystem.GetConnectionLogs(networkId, deviceId)
+	local logText = "=== CONNECTION LOGS ===\n\n"
+	if #connectionLogs == 0 then logText = logText .. "No connection activity recorded.\n" else
+		for i = math.max(1, #connectionLogs - 9), #connectionLogs do
+			local log = connectionLogs[i]
+			logText = logText .. string.format("[%s] %s from %s (%ds ago)\n", log.Success and "SUCCESS" or "FAILED", log.Action, log.UserIP, math.floor(os.time() - log.Time))
+		end
+	end
+	Events.TerminalResponse:FireClient(player, logText)
+end)
+
+Events.UpdateViewerPositions.OnServerEvent:Connect(function(player, positionsData)
+	local data = PlayerData[player.UserId]
+	if not data or not data.Networks then return end
+	for _, posData in ipairs(positionsData) do
+		for _, network in ipairs(data.Networks) do
+			if network.Id == posData.NetworkId then
+				network.Position = posData.Position
+				if posData.Devices then
+					for _, devicePosData in ipairs(posData.Devices) do
+						for _, device in ipairs(network.Devices) do
+							if device.Id == devicePosData.DeviceId then
+								device.RelativePosition = devicePosData.RelativePosition
+								break
+							end
+						end
+					end
+				end
+				break
+			end
+		end
+	end
+end)
+
+Events.RequestSpecialItems.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	local specialItems = data and data.SpecialItems or {}
+	if #specialItems == 0 then
+		local UnifiedStore = DataStoreService:GetDataStore("UnifiedPlayerData" .. ver)
+		local success, savedString = pcall(function() return UnifiedStore:GetAsync("Player_" .. player.UserId) end)
+		if success and savedString then
+			local decodeSuccess, savedData = pcall(function() return HttpService:JSONDecode(savedString) end)
+			if decodeSuccess and savedData and savedData.SpecialItems then
+				specialItems = savedData.SpecialItems
+				if data then data.SpecialItems = specialItems end
+			end
+		end
+	end
+	Events.SendSpecialItems:FireClient(player, specialItems)
+end)
+
+Events.SellSpecialItem.OnServerEvent:Connect(function(player, itemIndex)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local currentNet = NetworkStateManager.GetNetwork(data.CurrentNetwork, player.UserId)
+	if not currentNet or not GameData.NetworkTypes[currentNet.Type] or not GameData.NetworkTypes[currentNet.Type].CanSellTopSecret then
+		Events.NotifyPlayer:FireClient(player, "Error", "You must be on a Black Market Hub to sell items!")
+		return
+	end
+	local specialItems = data.SpecialItems or {}
+	if #specialItems == 0 then Events.NotifyPlayer:FireClient(player, "Error", "You have no special items to sell!") return end
+	if itemIndex < 1 or itemIndex > #specialItems then Events.NotifyPlayer:FireClient(player, "Error", "Invalid item index!") return end
+
+	local item = specialItems[itemIndex]
+	local itemValue = item.Value or 0
+	table.remove(specialItems, itemIndex)
+	data.SpecialItems = specialItems
+	data.Money = (data.Money or 0) + itemValue
+
+	local UnifiedStore = DataStoreService:GetDataStore("UnifiedPlayerData" .. ver)
+	pcall(function()
+		local savedString = UnifiedStore:GetAsync("Player_" .. player.UserId)
+		if savedString then
+			local savedData = HttpService:JSONDecode(savedString)
+			if savedData then
+				savedData.SpecialItems = specialItems
+				savedData.Money = data.Money
+				UnifiedStore:SetAsync("Player_" .. player.UserId, HttpService:JSONEncode(savedData))
+			end
+		end
+	end)
+
+	Events.UpdateMoney:FireClient(player, data.Money)
+	Events.SendSpecialItems:FireClient(player, specialItems)
+	Events.NotifyPlayer:FireClient(player, "Success", "Sold " .. (item.Type == "NuclearLaunchCodes" and "Nuclear Launch Codes" or "Police Database") .. " for " .. itemValue .. " RC!")
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	pcall(function() DataStoreManager.SetPlayerMoney(player.UserId, data.Money) end)
+end)
+
+Events.UpgradeScannerSkill.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local currentLevel = data.NetworkScannerLevel or 1
+	local nextLevel = currentLevel + 1
+	local nextLevelData = GameData.NetworkScannerLevels[nextLevel]
+	if not nextLevelData then Events.NotifyPlayer:FireClient(player, "Error", "Scanner skill is already at maximum level!") return end
+	if data.Money < nextLevelData.Cost then Events.NotifyPlayer:FireClient(player, "Error", "Insufficient funds! Need " .. nextLevelData.Cost .. " RC.") return end
+	data.Money = data.Money - nextLevelData.Cost
+	data.NetworkScannerLevel = nextLevel
+	Events.UpdateMoney:FireClient(player, data.Money)
+	Events.NotifyPlayer:FireClient(player, "Success", "Scanner skill upgraded to " .. nextLevelData.Name .. "! You can now scan up to " .. nextLevelData.MaxSecurity .. " star networks.")
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	pcall(function() DataStoreManager.SetPlayerMoney(player.UserId, data.Money) end)
+end)
+
+Events.UpgradeHackingSkill.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local currentLevel = data.NetworkHackingLevel or 1
+	local nextLevel = currentLevel + 1
+	local nextLevelData = GameData.NetworkHackingLevels[nextLevel]
+	if not nextLevelData then Events.NotifyPlayer:FireClient(player, "Error", "Hacking skill is already at maximum level!") return end
+	if data.Money < nextLevelData.Cost then Events.NotifyPlayer:FireClient(player, "Error", "Insufficient funds! Need " .. nextLevelData.Cost .. " RC.") return end
+	data.Money = data.Money - nextLevelData.Cost
+	data.NetworkHackingLevel = nextLevel
+	Events.UpdateMoney:FireClient(player, data.Money)
+	Events.NotifyPlayer:FireClient(player, "Success", "Hacking skill upgraded to " .. nextLevelData.Name .. "! You can now hack up to " .. nextLevelData.MaxSecurity .. " star networks.")
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	pcall(function() DataStoreManager.SetPlayerMoney(player.UserId, data.Money) end)
+end)
+
+Events.UnlockScriptingArea.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	if data.ScriptingAreaUnlocked then Events.NotifyPlayer:FireClient(player, "Error", "Scripting area is already unlocked!") return end
+	local cost = GameData.ScriptBlockCosts.ScriptingArea or 10000
+	if data.Money < cost then Events.NotifyPlayer:FireClient(player, "Error", "Insufficient funds! Need " .. cost .. " RC.") return end
+	data.Money = data.Money - cost
+	data.ScriptingAreaUnlocked = true
+	Events.UpdateMoney:FireClient(player, data.Money)
+	Events.NotifyPlayer:FireClient(player, "Success", "Scripting area unlocked! You can now create programs.")
+	Events.SendSystemData:FireClient(player, { Money = data.Money, CPULevel = data.CPULevel, RAMLevel = data.RAMLevel, NetworkLevel = data.NetworkLevel, PCSecurityLevel = data.PCSecurityLevel, HomeAdminTier = data.HomeAdminTier, OwnedGamepasses = data.OwnedGamepasses, ScriptingAreaUnlocked = data.ScriptingAreaUnlocked, UnlockedScriptBlocks = data.UnlockedScriptBlocks or {} })
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	DataSaveManager.QueuePlayerSave(player.UserId)
+end)
+
+Events.UnlockScriptBlock.OnServerEvent:Connect(function(player, blockType)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	if not data.ScriptingAreaUnlocked then Events.NotifyPlayer:FireClient(player, "Error", "You must unlock the scripting area first!") return end
+	data.UnlockedScriptBlocks = data.UnlockedScriptBlocks or {}
+	if data.UnlockedScriptBlocks[blockType] then Events.NotifyPlayer:FireClient(player, "Error", "This block type is already unlocked!") return end
+	local cost = GameData.ScriptBlockCosts.DefaultBlock or 5000
+	if data.Money < cost then Events.NotifyPlayer:FireClient(player, "Error", "Insufficient funds! Need " .. cost .. " RC.") return end
+	data.Money = data.Money - cost
+	data.UnlockedScriptBlocks[blockType] = true
+	Events.UpdateMoney:FireClient(player, data.Money)
+	Events.NotifyPlayer:FireClient(player, "Success", "Block type '" .. blockType .. "' unlocked!")
+	Events.SendSystemData:FireClient(player, { Money = data.Money, CPULevel = data.CPULevel, RAMLevel = data.RAMLevel, NetworkLevel = data.NetworkLevel, PCSecurityLevel = data.PCSecurityLevel, HomeAdminTier = data.HomeAdminTier, OwnedGamepasses = data.OwnedGamepasses, ScriptingAreaUnlocked = data.ScriptingAreaUnlocked, UnlockedScriptBlocks = data.UnlockedScriptBlocks or {} })
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	DataSaveManager.QueuePlayerSave(player.UserId)
+end)
+
+Events.RequestNetSecQTE.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local hasNetSec = false
+	for _, net in ipairs(data.Networks) do if net.Type == "NetSecNetwork" and net.Hacked then hasNetSec = true break end end
+	if not hasNetSec then Events.NotifyPlayer:FireClient(player, "Error", "You must hack a NetSec Network first!") return end
+	Events.NotifyPlayer:FireClient(player, "Info", "NetSec QTE system ready! (Full implementation needed)")
+end)
+
+Events.CompleteNetSecQTE.OnServerEvent:Connect(function(player, success, reductionPercent)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	if not success then Events.NotifyPlayer:FireClient(player, "Failed", "QTE failed! No bounty reduction.") return end
+	if BountyManager then
+		local policeBounty = BountyManager.FindPoliceBounty(player.UserId)
+		if policeBounty then
+			local reduction = math.floor(policeBounty.Bounty * (reductionPercent or 0.5))
+			if reductionPercent >= 1.0 then
+				BountyManager.RemovePoliceBounty(player.UserId)
+				Events.NotifyPlayer:FireClient(player, "Success", "Bounty completely cleared!")
+			else
+				BountyManager.PoliceBounties.Players[policeBounty].Bounty = math.max(0, policeBounty.Bounty - reduction)
+				Events.NotifyPlayer:FireClient(player, "Success", "Bounty reduced by " .. reduction .. " RC!")
+			end
+		else
+			Events.NotifyPlayer:FireClient(player, "Info", "You have no active bounty.")
+		end
+	end
+end)
+
+local function checkGroupMembership(player)
+	if not GroupRewardsConfig or not GroupRewardsConfig.GroupId then return false, 0 end
+	local groupId = GroupRewardsConfig.GroupId
+	local ok, inGroup = pcall(function() return player:IsInGroup(groupId) end)
+	if not ok or not inGroup then return false, 0 end
+	local ok2, rank = pcall(function() return player:GetRankInGroup(groupId) end)
+	if not ok2 or not rank then return false, 0 end
+	if rank < (GroupRewardsConfig.MinRank or 0) then return false, rank end
+	return true, rank
+end
+
+local function getGroupRewardCooldownState(data)
+	local lastClaim = data and data.GroupRewardClaimed and data.GroupRewardClaimed.LastClaimTime or 0
+	local cooldown = GroupRewardsConfig and GroupRewardsConfig.ClaimCooldown or (24 * 3600)
+	if lastClaim <= 0 then return false, 0 end
+	local elapsed = os.time() - lastClaim
+	if elapsed < cooldown then return true, (cooldown - elapsed) end
+	return false, 0
+end
+
+Events.CheckGroupReward.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local inGroup, rank = checkGroupMembership(player)
+	local onCooldown, remaining = getGroupRewardCooldownState(data)
+	Events.SendGroupRewardStatus:FireClient(player, {InGroup = inGroup, Rank = rank, OnCooldown = onCooldown, CooldownRemaining = remaining})
+end)
+
+Events.ClaimGroupReward.OnServerEvent:Connect(function(player)
+	local data = PlayerData[player.UserId]
+	if not data then return end
+	local inGroup, rank = checkGroupMembership(player)
+	if not inGroup then Events.NotifyPlayer:FireClient(player, "Error", "You must be a member of the group to claim rewards!") return end
+	local onCooldown, remaining = getGroupRewardCooldownState(data)
+	if onCooldown then Events.NotifyPlayer:FireClient(player, "Error", "Daily group reward is still on cooldown! Next in " .. math.ceil(remaining/60) .. " minute(s).") return end
+
+	local rewards = GroupRewardsConfig.Rewards or {}
+	local rewardsGiven = {}
+
+	if rewards.Money then
+		data.Money = (data.Money or 0) + rewards.Money
+		Events.UpdateMoney:FireClient(player, data.Money)
+		table.insert(rewardsGiven, rewards.Money .. " RC")
+		pcall(function() DataStoreManager.SetPlayerMoney(player.UserId, data.Money) end)
+	end
+	if rewards.SkillPoints then
+		data.PendingSkillPoints = (data.PendingSkillPoints or 0) + rewards.SkillPoints
+		local spAwarded = math.floor(data.PendingSkillPoints)
+		data.PendingSkillPoints = data.PendingSkillPoints - spAwarded
+		if spAwarded > 0 then
+			data.SkillPoints = math.min((GameData.SkillTree.MaxSkillPoints or 50), (data.SkillPoints or 0) + spAwarded)
+			table.insert(rewardsGiven, spAwarded .. " SP")
+		end
+		Events.SendSkillTree:FireClient(player, {SkillPoints = data.SkillPoints or 0, UnlockedSkills = data.UnlockedSkills or {}})
+	end
+	if rewards.Experience then
+		pcall(function() ProgressionManager.AwardExperience(player, rewards.Experience, "Group Reward") end)
+		table.insert(rewardsGiven, rewards.Experience .. " XP")
+	end
+
+	data.GroupRewardClaimed = {LastClaimTime = os.time(), ClaimCount = (data.GroupRewardClaimed and data.GroupRewardClaimed.ClaimCount or 0) + 1}
+	DataSaveManager.QueuePlayerSave(player.UserId)
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	local oc, r = getGroupRewardCooldownState(data)
+	Events.SendGroupRewardStatus:FireClient(player, {InGroup = true, Rank = rank, OnCooldown = oc, CooldownRemaining = r})
+	Events.NotifyPlayer:FireClient(player, "Success", "Claimed: " .. table.concat(rewardsGiven, ", "))
+end)
+
+local PurchaseMusic = RemoteEvents:FindFirstChild("PurchaseMusic")
+if PurchaseMusic then
+	PurchaseMusic.OnServerEvent:Connect(function(player, trackIndex)
+		local data = DataStoreManager.GetPlayerData(player) 
+		if not data then return end
+		local TRACK_COST = 500
+		if not data.OwnedMusic then data.OwnedMusic = {[1] = true} end
+		if data.OwnedMusic[trackIndex] or data.OwnedMusic[tostring(trackIndex)] then return end
+		if data.Money >= TRACK_COST then
+			data.Money = data.Money - TRACK_COST
+			data.OwnedMusic[tostring(trackIndex)] = true
+			DataStoreManager.SavePlayerData(player)
+			RemoteEvents:FindFirstChild("UpdateOwnedMusic"):FireClient(player, trackIndex)
+			Events.UpdateMoney:FireClient(player, data.Money)
+		else
+			Events.NotifyPlayer:FireClient(player, "Error", "Insufficient RC!")
+		end
+	end)
+end
+
+local ServerStorage = game:GetService("ServerStorage")
+local AddMoneySignal = ServerStorage:FindFirstChild("AddPlayerMoney") or Instance.new("BindableEvent", ServerStorage)
+AddMoneySignal.Name = "AddPlayerMoney"
+AddMoneySignal.Event:Connect(function(player, amount, xp)
+	if PlayerData[player.UserId] then
+		PlayerData[player.UserId].Money = (PlayerData[player.UserId].Money or 0) + amount
+		PlayerData[player.UserId].Experience = (PlayerData[player.UserId].Experience or 0) + xp
+		PlayerData[player.UserId].Stats = PlayerData[player.UserId].Stats or {}
+		PlayerData[player.UserId].Stats.MoneyStolen = (PlayerData[player.UserId].Stats.MoneyStolen or 0) + amount
+		Events.UpdateMoney:FireClient(player, PlayerData[player.UserId].Money)
+	end
+end)
+
+_G.AwardTaskReward = function(player, amount, xp)
+	local data = PlayerData[player.UserId]
+	if not data then return false end
+	data.Money = (data.Money or 0) + amount
+	Events.UpdateMoney:FireClient(player, data.Money)
+	pcall(function() ProgressionManager.AwardExperience(player, xp, "Task Reward") end)
+	DataSaveManager.QueuePlayerSave(player.UserId)
+	DataSaveManager.MarkPlayerDirty(player.UserId)
+	return true
+end
